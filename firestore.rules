@@ -1,0 +1,72 @@
+rules_version = '2';
+
+// 營地分帳本的權限規則
+// - 露營（trips）：成員可以讀取和修改設定；知道露營 ID（邀請連結）的登入者可以讀取並把自己加入成員
+// - 花費（expenses）：只有成員看得到；只能修改或刪除自己記的，露營建立者可以修改全部
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function tripData(tripId) {
+      return get(/databases/$(database)/documents/trips/$(tripId)).data;
+    }
+    function isMember(tripId) {
+      return signedIn() && request.auth.uid in tripData(tripId).members;
+    }
+    function isTripOwner(tripId) {
+      return signedIn() && tripData(tripId).ownerUid == request.auth.uid;
+    }
+    function validSettings(d) {
+      return d.name is string && d.name.size() > 0 && d.name.size() <= 60
+        && d.days is int && d.days >= 1 && d.days <= 7
+        && d.groups is list && d.groups.size() <= 20
+        && d.meals is list;
+    }
+    function validExpense(d) {
+      return d.title is string && d.title.size() > 0 && d.title.size() <= 100
+        && (d.amount is int || d.amount is float) && d.amount > 0 && d.amount < 10000000
+        && d.createdBy is string;
+    }
+
+    match /trips/{tripId} {
+      // 單筆讀取：拿到邀請連結（露營 ID）的登入者可以看到露營名稱，決定要不要加入
+      allow get: if signedIn();
+      // 清單查詢：只能查自己是成員的露營
+      allow list: if signedIn() && request.auth.uid in resource.data.members;
+
+      allow create: if signedIn()
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.members == [request.auth.uid]
+        && validSettings(request.resource.data);
+
+      allow update: if signedIn() && (
+        // 成員修改設定：不能動建立者、成員名單和建立時間
+        (request.auth.uid in resource.data.members
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['ownerUid', 'members', 'createdAt'])
+          && validSettings(request.resource.data))
+        ||
+        // 非成員透過邀請連結加入：只能把自己加到成員名單最後面
+        (!(request.auth.uid in resource.data.members)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+          && request.resource.data.members == resource.data.members.concat([request.auth.uid]))
+      );
+
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+
+      match /expenses/{expenseId} {
+        allow read: if isMember(tripId);
+        allow create: if isMember(tripId)
+          && request.resource.data.createdBy == request.auth.uid
+          && validExpense(request.resource.data);
+        allow update: if isMember(tripId)
+          && (resource.data.createdBy == request.auth.uid || isTripOwner(tripId))
+          && request.resource.data.createdBy == resource.data.createdBy
+          && validExpense(request.resource.data);
+        allow delete: if isMember(tripId)
+          && (resource.data.createdBy == request.auth.uid || isTripOwner(tripId));
+      }
+    }
+  }
+}

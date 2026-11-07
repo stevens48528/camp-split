@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.firebase/
+# 私人資料：朋友的名字和金額，不要上傳到公開的 repo
+private/
+HANDOFF.md
+*.csv
+camp-split.html

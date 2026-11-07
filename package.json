@@ -1,0 +1,12 @@
+{
+  "name": "camp-split",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/split.test.mjs && firebase emulators:exec --only firestore --project demo-camp-split \"node --test tests/rules.test.mjs\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "firebase": "^13.1.0"
+  }
+}
