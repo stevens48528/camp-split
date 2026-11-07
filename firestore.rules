@@ -27,7 +27,9 @@ service cloud.firestore {
       return d.name is string && d.name.size() > 0 && d.name.size() <= 60
         && d.days is int && d.days >= 1 && d.days <= 7
         && d.groups is list && d.groups.size() <= 20
-        && d.meals is list;
+        && d.meals is list
+        // 已結清的時間（毫秒），沒結清是 null 或不存在
+        && (!('settledAt' in d) || d.settledAt == null || d.settledAt is int);
     }
     function validExpense(d) {
       return d.title is string && d.title.size() > 0 && d.title.size() <= 100

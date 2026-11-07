@@ -66,6 +66,13 @@ test("只有建立者可以改設定，而且不能改建立者或成員名單",
   await assertFails(updateDoc(doc(as(OWNER), "trips", TRIP), { members: [OWNER] }));
 });
 
+test("只有建立者可以標記結清", async () => {
+  await assertSucceeds(updateDoc(doc(as(OWNER), "trips", TRIP), { settledAt: 1730000000000 }));
+  await assertSucceeds(updateDoc(doc(as(OWNER), "trips", TRIP), { settledAt: null }));
+  await assertFails(updateDoc(doc(as(OWNER), "trips", TRIP), { settledAt: "yes" }));
+  await assertFails(updateDoc(doc(as("member"), "trips", TRIP), { settledAt: 1730000000000 }));
+});
+
 test("只有白名單的人可以建立露營，建立者和成員必須是自己", async () => {
   await assertSucceeds(setDoc(doc(as(OWNER), "trips", "t2"), { ...settings, ownerUid: OWNER, members: [OWNER], createdAt: 2 }));
   await assertFails(setDoc(doc(as("member"), "trips", "t3"), { ...settings, ownerUid: "member", members: ["member"], createdAt: 2 }));
