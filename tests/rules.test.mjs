@@ -73,6 +73,24 @@ test("只有建立者可以標記結清", async () => {
   await assertFails(updateDoc(doc(as("member"), "trips", TRIP), { settledAt: 1730000000000 }));
 });
 
+test("成員只能選自己是哪一組，不能改別人的", async () => {
+  const db = as("member");
+  await assertSucceeds(updateDoc(doc(db, "trips", TRIP), { "memberGroups.member": { g: "g1", name: "小華" } }));
+  await assertSucceeds(updateDoc(doc(db, "trips", TRIP), { "memberGroups.member": { g: "g2", name: "小華" } }));
+  await assertFails(updateDoc(doc(db, "trips", TRIP), { [`memberGroups.${OWNER}`]: { g: "g1", name: "冒名" } }));
+  await assertFails(updateDoc(doc(db, "trips", TRIP), { "memberGroups.member": { g: "g1", name: "小華", extra: 1 } }));
+  await assertFails(updateDoc(doc(db, "trips", TRIP), { "memberGroups.member": "g1" }));
+  await assertFails(updateDoc(doc(db, "trips", TRIP), { "memberGroups.member": { g: "g1", name: "小華" }, name: "改名" }));
+  await assertFails(updateDoc(doc(as("outsider"), "trips", TRIP), { "memberGroups.outsider": { g: "g1", name: "路人" } }));
+  // 建立者自己選組走的是改設定的權限
+  await assertSucceeds(updateDoc(doc(as(OWNER), "trips", TRIP), { [`memberGroups.${OWNER}`]: { g: "g1", name: "我" } }));
+});
+
+test("建立露營時可以沿用上次的組別選擇", async () => {
+  await assertSucceeds(setDoc(doc(as(OWNER), "trips", "t6"), { ...settings, ownerUid: OWNER, members: [OWNER], createdAt: 3,
+    memberGroups: { member: { g: "g1", name: "小華" } } }));
+});
+
 test("只有白名單的人可以建立露營，建立者和成員必須是自己", async () => {
   await assertSucceeds(setDoc(doc(as(OWNER), "trips", "t2"), { ...settings, ownerUid: OWNER, members: [OWNER], createdAt: 2 }));
   await assertFails(setDoc(doc(as("member"), "trips", "t3"), { ...settings, ownerUid: "member", members: ["member"], createdAt: 2 }));

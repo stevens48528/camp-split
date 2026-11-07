@@ -1,7 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
 import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signInWithRedirect, signOut }
   from "https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js";
-import { getFirestore, collection, doc, query, where, onSnapshot, setDoc, updateDoc, getDoc, getDocs, arrayUnion, writeBatch }
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, query, where, onSnapshot, setDoc, updateDoc, getDoc, getDocs, arrayUnion, writeBatch }
   from "https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js";
 import { SLOTS, CATS, catOf, MODES, PCTS, money, mealIds, defaultMeals, dayLabel, mealLabel, nightsOf,
   sharedAmount, sharesFor, settle, describe } from "./split.js";
@@ -17,13 +17,18 @@ const firebaseConfig = {
 };
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
-const db = getFirestore(fb);
+// 資料先存在手機上（IndexedDB），營地沒訊號也能記帳，有網路時自動上傳
+const db = initializeFirestore(fb, {localCache: persistentLocalCache({tabManager: persistentMultipleTabManager()})});
 
 const S = {
   mode:"loading",     // loading | signedout | live | demo
   user:null, trips:[], tripId:null, expenses:[], tab:"list",
   invite:null,        // {id, name}：從邀請連結進來、還不是成員的露營
   form:null, settingsDraft:null, confirm:null,
+  menu:null,          // null | "main" | "install"：右上角選單
+  newTrip:null,       // 新增露營的表單
+  skipBind:{},        // 這次先不選組別的露營
+  offline:!navigator.onLine,
   summaries:{},       // 露營清單用：{露營ID: {total, transfers, count}}
 };
 let unsubTrips = null, unsubExp = null, DEMO = null;
@@ -67,18 +72,25 @@ const canEditSettings = () => S.mode === "demo" || amOwner();
 const groupName = (trip, gid) => (trip.groups.find(g => g.id === gid) || {}).name || "已移除的組";
 const who = e => e.createdBy === myId() ? "你" : (e.createdByName || "某位朋友");
 const canEditExp = e => e.createdBy === myId() || amOwner();
+// 登入者在這場露營是哪一組（存在露營的 memberGroups）；組被刪掉就當作還沒選
+const myGroup = (trip, uid = myId()) => {
+  const b = trip.memberGroups?.[uid];
+  return b && trip.groups.some(g => g.id === b.g) ? b.g : null;
+};
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 const peopleOf = trip => trip.groups.reduce((a,g) => a + (+g.people||0), 0);
 const tripLine = trip => `${trip.startDate ? esc(dayLabel(trip,1)) + " 出發 · " : ""}${trip.days} 天 ${trip.days-1} 夜 · ${trip.groups.length} 組 ${peopleOf(trip)} 人`;
 const inviteLink = id => `${location.origin}${location.pathname}?trip=${encodeURIComponent(id)}&openExternalBrowser=1`;
 // LINE、Facebook 等 App 內建瀏覽器會被 Google 擋下登入
 const inApp = /Line\/|FBAN|FBAV|Instagram|MicroMessenger/i.test(navigator.userAgent);
 
-function newTrip(name){
-  const days = 3, meals = defaultMeals(days);
-  return {
-    name, startDate:"", days, meals,
-    groups:[1,2].map(n => ({id:uid(), name:`第 ${n} 組`, people:2, meals:[...meals], nights:[1,2]})),
-  };
+// from：沿用某次露營的組別（同樣的組 ID，朋友選過的組別也會跟著沿用）
+function newTrip(name, days = 3, startDate = "", from = null){
+  const meals = defaultMeals(days), nights = nightsOf({days});
+  const base = from ? from.groups.map(g => ({id:g.id, name:g.name, people:g.people}))
+    : [1,2].map(n => ({id:uid(), name:`第 ${n} 組`, people:2}));
+  return {name, startDate, days, meals, groups:base.map(g => ({...g, meals:[...meals], nights:[...nights]}))};
 }
 
 /* ---------- data layer ---------- */
@@ -89,9 +101,10 @@ function errMsg(e){
   if (c === "resource-exhausted") return "今天的免費額度用完了，請明天再試。";
   return "儲存失敗，請稍後再試一次。";
 }
-async function write(fn, demoFn){
+// 寫入會先存在手機上，不等伺服器回應，沒訊號時也不會卡住；真的失敗（例如沒權限）再提示
+function write(fn, demoFn){
   if (S.mode === "demo"){ demoFn(); render(); return true; }
-  try { await fn(); return true; }
+  try { fn().catch(e => { console.error(e); toast(errMsg(e)); }); return true; }
   catch(e){ console.error(e); toast(errMsg(e)); return false; }
 }
 function selectTrip(id){
@@ -99,8 +112,8 @@ function selectTrip(id){
   if (unsubExp){ unsubExp(); unsubExp = null; }
   if (S.mode === "demo") S.expenses = DEMO.expenses;
   else if (id){
-    unsubExp = onSnapshot(collection(db, "trips", id, "expenses"),
-      snap => { S.expenses = snap.docs.map(d => ({id:d.id, ...d.data()})); render(); },
+    unsubExp = onSnapshot(collection(db, "trips", id, "expenses"), {includeMetadataChanges:true},
+      snap => { S.expenses = snap.docs.map(d => ({id:d.id, ...d.data(), pending:d.metadata.hasPendingWrites})); render(); },
       e => { console.error(e); toast("讀取花費失敗，請重新整理頁面。"); });
   }
   render();
@@ -142,7 +155,9 @@ async function loadSummaries(){
   const res = await Promise.all(S.trips.map(t => getDocs(collection(db, "trips", t.id, "expenses"))
     .then(snap => {
       const {total, transfers} = settle(t, snap.docs.map(d => d.data()));
-      return [t.id, {total, transfers:transfers.length, count:snap.size}];
+      const mg = myGroup(t), sumOf = list => list.reduce((a, x) => a + x.amt, 0);
+      const mine = mg && {pay:sumOf(transfers.filter(x => x.from === mg)), get:sumOf(transfers.filter(x => x.to === mg))};
+      return [t.id, {total, transfers:transfers.length, count:snap.size, mine}];
     })
     .catch(e => { console.error(e); return [t.id, null]; })));
   if (seq !== summarySeq) return;
@@ -238,12 +253,15 @@ function render(){
   if (trip) h += `<div class="small muted">${tripLine(trip)}</div>`;
   else if (home) h += `<div class="small muted">共 ${S.trips.length} 場</div>`;
   h += `</div><div class="tripbar">`;
-  if (home && canCreate()) h += `<button class="btn" data-act="new-trip">新增露營</button>
-      <label class="btn filebtn">從備份匯入<input type="file" id="import-file" accept=".json,application/json"></label>`;
-  if (S.user && S.mode !== "demo"){
-    h += `<span class="userchip">${S.user.photoURL ? `<img src="${esc(S.user.photoURL)}" alt="" referrerpolicy="no-referrer">` : ""}${esc(S.user.displayName || "")}<button class="btn ghost" data-act="signout">登出</button></span>`;
+  if (home && canCreate()) h += `<button class="btn" data-act="new-trip">新增露營</button>`;
+  if ((S.user && S.mode === "live") || S.mode === "demo"){
+    const photo = S.mode === "live" && S.user.photoURL;
+    h += `<button class="btn menubtn" data-act="menu" aria-haspopup="dialog">${photo ? `<img src="${esc(photo)}" alt="" referrerpolicy="no-referrer">` : ""}選單</button>`;
   }
   h += `</div></header>`;
+  if (S.offline && S.mode === "live"){
+    h += `<div class="banner"><span>目前沒有網路。新記的花費會先存在這支手機，有訊號時自動上傳。</span></div>`;
+  }
 
   if (S.mode === "demo"){
     h += `<div class="banner"><span>這是範例資料，只在你的畫面上試算，不會儲存。</span><button class="btn" data-act="leave-demo">結束範例</button></div>`;
@@ -273,6 +291,12 @@ function render(){
       <label class="btn filebtn">從備份匯入<input type="file" id="import-file" accept=".json,application/json"></label>
       <button class="btn" data-act="demo">先看範例</button></div></div>`;
   } else {
+    if (S.mode === "live" && trip.groups.length && !myGroup(trip) && !S.skipBind[trip.id]){
+      h += `<div class="panel stack bind"><h2>你是哪一組？</h2>
+        <p class="muted" style="margin:0">選了之後，新增花費會自動帶入你這組，露營清單也會顯示你要付或要收多少。之後可以在右上角選單更改。</p>
+        <div class="chips">${trip.groups.map(g => `<button class="chip" data-mygroup="${esc(g.id)}">${esc(g.name)}</button>`).join("")}</div>
+        <div><button class="btn ghost" data-act="skip-bind">之後再說</button></div></div>`;
+    }
     h += renderSettle(trip);
     h += `<div class="tabs" role="tablist">
       <button class="tab" role="tab" aria-selected="${S.tab==="list"}" data-tab="list">花費明細 <span class="muted small">${S.expenses.length}</span></button>
@@ -281,7 +305,7 @@ function render(){
   }
   app.innerHTML = h;
   // 表單開著時不重畫，別人同步進來的資料才不會打斷輸入
-  if (!S.form) renderLayer();
+  if (!S.form && !S.newTrip) renderLayer();
 }
 
 // 依出發日排序（沒填就用建立日），新的在前，按年份分段
@@ -300,9 +324,13 @@ function renderHome(){
       : `<span class="pill warn">待結清</span>`;
     const sum = !s ? `<span class="muted">計算中…</span>`
       : `總花費 <span class="num">${money(s.total)}</span>${s.transfers && !t.settledAt ? ` · ${s.transfers} 筆轉帳` : ""}`;
+    const m = s?.mine && !t.settledAt && s.count
+      ? s.mine.pay ? `<span class="meta you neg">你這組要付 <span class="num">${money(s.mine.pay)}</span></span>`
+      : s.mine.get ? `<span class="meta you pos">你這組會收到 <span class="num">${money(s.mine.get)}</span></span>`
+      : `<span class="meta you">你這組不用轉帳</span>` : "";
     h += `<button class="tripcard${t.settledAt ? " done" : ""}" data-open="${esc(t.id)}">
       <span class="t">${esc(t.name)}</span>${status}
-      <span class="meta">${tripLine(t)}</span><span class="meta">${sum}</span></button>`;
+      <span class="meta">${tripLine(t)}</span><span class="meta">${sum}</span>${m}</button>`;
   }
   return h + "</section>";
 }
@@ -311,17 +339,14 @@ function renderSettle(trip){
   const {rows, total, transfers} = settle(trip, S.expenses);
   let h = `<section class="panel settle" aria-label="結算">
     <div class="settle-head"><div><div class="label">共同花費${trip.settledAt ? ` <span class="pill acc">✓ 已結清</span>` : ""}</div><div class="total num">${money(total)}</div></div>
-    <div class="row">${S.mode === "live" ? `<button class="btn" data-act="invite">邀請朋友</button>` : ""}
-    <button class="btn" data-act="copy" ${transfers.length ? "" : "disabled"}>複製結算到 LINE</button>
-    <button class="btn" data-act="export" ${S.expenses.length ? "" : "disabled"}>匯出 CSV</button>
-    ${canEditSettings() && S.expenses.length ? `<button class="btn" data-act="settled">${trip.settledAt ? "取消已結清" : "標記已結清"}</button>` : ""}</div></div>`;
+    <button class="btn" data-act="copy" ${transfers.length ? "" : "disabled"}>複製結算到 LINE</button></div>`;
   if (!S.expenses.length){
     h += `<div class="empty">還沒有花費。按下方「新增花費」，記下誰先墊了多少。</div>`;
   } else if (!transfers.length){
     h += `<div class="empty">大家已經打平，不需要轉帳。</div>`;
   } else {
     h += `<div><div class="label" style="margin-bottom:6px">${trip.settledAt ? "已結清，當時的轉帳如下" : `轉帳 ${transfers.length} 筆就結清`}</div><ul class="transfers">${transfers.map(t =>
-      `<li class="transfer"><span>${esc(groupName(trip,t.from))}</span><span class="arrow" aria-label="轉給">→</span><span class="to">${esc(groupName(trip,t.to))}</span><span class="amt num">${money(t.amt)}</span></li>`).join("")}</ul></div>`;
+      `<li class="transfer${[t.from, t.to].includes(myGroup(trip)) ? " mine" : ""}"><span>${esc(groupName(trip,t.from))}</span><span class="arrow" aria-label="轉給">→</span><span class="to">${esc(groupName(trip,t.to))}</span><span class="amt num">${money(t.amt)}</span></li>`).join("")}</ul></div>`;
   }
   h += `<div class="tablewrap"><table><thead><tr><th>組別</th><th>人數</th><th>先墊付</th><th>應分攤</th><th>每人約</th><th>差額</th></tr></thead><tbody>`;
   for (const g of trip.groups){
@@ -352,6 +377,7 @@ function renderList(trip){
       h += `<button class="exp" data-edit="${esc(e.id)}"><span class="t">${esc(e.title || "未命名")}</span><span class="a num">${money(e.amount)}</span>
         <span class="meta"><span>${esc(groupName(trip, e.payer))} 墊付 · ${esc(who(e))}記錄</span><span class="pill">${esc(describe(e))}</span>
         ${canEditExp(e) ? "" : `<span class="pill">僅檢視</span>`}
+        ${e.pending ? `<span class="pill warn">等待上傳</span>` : ""}
         ${pct !== 100 ? `<span class="pill acc">只分攤 ${pct}%：${money(sharedAmount(e))}</span>` : ""}
         ${bad ? `<span class="pill warn">${e.mode==="custom" ? `自訂合計 ${money(shared)}，與分攤金額不符` : "沒有可分攤的組別"}</span>` : ""}
         <span>${Object.entries(sh).map(([g,v]) => `${esc(groupName(trip,g))} ${money(v)}`).join(" · ")}</span></span></button>`;
@@ -380,6 +406,9 @@ function renderSetup(trip){
     h += `<div class="group-row"><label class="field"><span>組名</span><input type="text" id="g-name-${g.id}" data-gname="${g.id}" value="${esc(g.name)}"></label>
       <label class="field"><span>人數</span><input type="number" id="g-ppl-${g.id}" data-gppl="${g.id}" min="0" step="0.5" value="${g.people}"></label>
       <button class="btn ghost" data-gdel="${g.id}" ${d.groups.length<=1?"disabled":""} aria-label="移除 ${esc(g.name)}">移除</button></div>`;
+    const names = Object.entries(trip.memberGroups || {}).filter(([u]) => (trip.members || []).includes(u) && myGroup(trip, u) === g.id)
+      .map(([u, b]) => u === myId() ? "你" : (b.name || "某位朋友"));
+    if (names.length) h += `<div class="hint">已選這組：${names.map(esc).join("、")}</div>`;
   }
   h += `<div><button class="btn" data-act="add-group">＋ 新增一組</button></div>
     <div class="hint">小孩吃得少可以算 0.5 人。</div></div>
@@ -391,7 +420,6 @@ function renderSetup(trip){
   }
   h += `</tbody></table></div></div></div></fieldset>
     <div class="actions">`;
-  if (S.mode === "live") h += `<button class="btn ghost" data-act="backup">下載備份</button>`;
   if (S.mode === "live" && amOwner()) h += S.confirm === "trip"
     ? `<span class="err">刪除後所有花費都會消失。</span><button class="btn danger" data-act="del-trip-yes">確定刪除</button><button class="btn" data-act="cancel-confirm">取消</button>`
     : `<button class="btn ghost" data-act="del-trip">刪除這次露營</button>`;
@@ -406,7 +434,7 @@ function openForm(e){
   const trip = currentTrip();
   const all = trip.groups.map(g => g.id);
   S.form = e ? JSON.parse(JSON.stringify(e)) : {
-    title:"", cat:"food", amount:"", payer: store.get("camp.payer." + trip.id) || trip.groups[0]?.id,
+    title:"", cat:"food", amount:"", payer: myGroup(trip) || store.get("camp.payer." + trip.id) || trip.groups[0]?.id,
     mode:"meals", unit:"group", groups:all, meals:[...trip.meals], pct:100, custom:{},
   };
   if (!trip.groups.some(g => g.id === S.form.payer)) S.form.payer = trip.groups[0]?.id;
@@ -431,7 +459,66 @@ function updatePreview(){
   box.innerHTML = previewHTML(f, currentTrip());
   document.querySelectorAll("[data-pct]").forEach(b => b.setAttribute("aria-pressed", String(Number(f.pct) === Number(b.dataset.pct))));
 }
+// 右上角選單：不常用的功能都收在這裡，主畫面只留記帳和結算
+function menuHTML(){
+  const trip = currentTrip(), live = S.mode === "live";
+  const item = (act, label, extra = "") => `<button class="menu-item" data-act="${act}" ${extra}>${label}</button>`;
+  let h = `<div class="overlay" data-act="close-bg"><div class="sheet menu" role="dialog" aria-modal="true" aria-labelledby="m-head">
+    <div class="sheet-head"><h2 id="m-head">${S.menu === "install" ? "加到手機主畫面" : "選單"}</h2><button class="btn ghost" data-act="close">關閉</button></div>`;
+  if (S.menu === "install"){
+    h += `<div class="stack"><p style="margin:0">${isIOS
+      ? "請用 Safari 打開這個網頁，點下方的「分享」按鈕，往下找「加入主畫面」。"
+      : "請點瀏覽器右上角的選單（⋮），選擇「加到主畫面」或「安裝應用程式」。"}</p>
+      <p class="hint" style="margin:0">加入後從主畫面打開，第一次需要再用 Google 登入一次。</p></div>`;
+    return h + `</div></div>`;
+  }
+  if (live) h += `<div class="userchip">${S.user.photoURL ? `<img src="${esc(S.user.photoURL)}" alt="" referrerpolicy="no-referrer">` : ""}${esc(S.user.displayName || S.user.email || "")}</div>`;
+  if (trip && trip.groups.length){
+    const mg = myGroup(trip);
+    h += `<div class="field"><span>你是哪一組</span><div class="chips">${trip.groups.map(g =>
+      `<button class="chip" aria-pressed="${g.id === mg}" data-mygroup="${esc(g.id)}">${esc(g.name)}</button>`).join("")}</div></div>`;
+  }
+  h += `<nav class="menu-list">`;
+  if (trip){
+    if (live) h += item("invite", "複製邀請連結");
+    h += item("export", "匯出 CSV（Excel）", S.expenses.length ? "" : "disabled");
+    if (live) h += item("backup", "下載備份");
+    if (canEditSettings() && S.expenses.length) h += item("settled", trip.settledAt ? "取消已結清" : "標記已結清");
+  } else if (canCreate()){
+    h += `<label class="menu-item filebtn">從備份匯入<input type="file" id="import-file" accept=".json,application/json"></label>`;
+  }
+  if (!standalone) h += item("install", "加到手機主畫面");
+  if (S.mode === "demo") h += item("leave-demo", "結束範例");
+  if (live) h += item("signout", "登出");
+  return h + `</nav></div></div>`;
+}
+function newTripHTML(){
+  const n = S.newTrip, src = S.trips.find(t => t.id === n.from);
+  return `<div class="overlay" data-act="close-bg"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="n-head">
+    <div class="sheet-head"><h2 id="n-head">新增露營</h2><button class="btn ghost" data-act="close">關閉</button></div>
+    <div class="stack">
+    <label class="field"><span>露營名稱</span><input type="text" id="n-name" maxlength="60" value="${esc(n.name)}" placeholder="例如：宜蘭幸福城"></label>
+    <div class="row"><label class="field"><span>出發日</span><input type="date" id="n-date" value="${esc(n.startDate)}"></label>
+      <label class="field" style="flex:0 1 110px"><span>天數</span><input type="number" id="n-days" min="1" max="7" value="${n.days}"></label></div>
+    ${n.lastId ? `<div class="field"><span>組別</span><div class="chips">
+      <button class="chip" aria-pressed="${!!src}" data-from="${esc(n.lastId)}">沿用「${esc(S.trips.find(t => t.id === n.lastId).name)}」</button>
+      <button class="chip" aria-pressed="${!src}" data-from="">從頭設定</button></div>
+      <div class="hint">${src ? `${src.groups.map(g => `${esc(g.name)} ${+g.people||0} 人`).join("、")}。朋友選過的組別也會沿用，出席的餐次之後再調整。` : "先建立兩組，之後再改組名和人數。"}</div></div>` : ""}
+    <div class="actions"><span class="spacer"></span><button class="btn" data-act="close">取消</button><button class="btn primary" data-act="create-trip">建立</button></div>
+    </div></div></div>`;
+}
+function setLayer(h){
+  const layer = $("#layer");
+  const focusId = document.activeElement?.id;
+  const sheetScroll = $(".sheet", layer)?.scrollTop;
+  layer.innerHTML = h;
+  if (sheetScroll) $(".sheet", layer).scrollTop = sheetScroll;
+  if (focusId) document.getElementById(focusId)?.focus();
+}
+function closeLayer(){ S.form = null; S.menu = null; S.newTrip = null; S.confirm = null; renderLayer(); }
 function renderLayer(){
+  if (S.menu) return setLayer(menuHTML());
+  if (S.newTrip) return setLayer(newTripHTML());
   const layer = $("#layer");
   const trip = currentTrip();
   if (!S.form || !trip){ layer.innerHTML = ""; return; }
@@ -467,11 +554,7 @@ function renderLayer(){
     ${f.readOnly ? `<div class="actions"><button class="btn" data-act="close">關閉</button></div>` : `<div class="actions">${f.id ? (S.confirm==="exp" ? `<button class="btn danger" data-act="del-yes">確定刪除</button><button class="btn" data-act="cancel-confirm">取消</button>` : `<button class="btn ghost" data-act="del">刪除</button>`) : ""}
       <span class="spacer"></span><button class="btn" data-act="close">取消</button><button class="btn primary" data-act="save">${f.id ? "儲存修改" : "新增"}</button></div>`}
     </div></div></div>`;
-  const focusId = document.activeElement?.id;
-  const sheetScroll = $(".sheet", layer)?.scrollTop;
-  layer.innerHTML = h;
-  if (sheetScroll) $(".sheet", layer).scrollTop = sheetScroll;
-  if (focusId) document.getElementById(focusId)?.focus();
+  setLayer(h);
 }
 function setErr(m){ S.form.err = m; renderLayer(); }
 async function saveForm(){
@@ -545,12 +628,43 @@ async function createTrip(settings, expenses = []){
   }
   return ref.id;
 }
+function openNewTrip(){
+  // 預設沿用最近一次露營的組別（同一群朋友通常是同樣幾組）
+  const last = [...S.trips].sort((a,b) => tripDate(b).localeCompare(tripDate(a)) || (b.createdAt||0) - (a.createdAt||0))[0];
+  S.menu = null;
+  S.newTrip = {name:"", startDate:"", days:3, from:last?.id || "", lastId:last?.id || ""};
+  renderLayer();
+  setTimeout(() => $("#n-name")?.focus(), 30);
+}
 async function newTripAction(){
+  const n = S.newTrip, src = S.trips.find(t => t.id === n.from);
+  const days = Math.max(1, Math.min(7, Math.round(Number(n.days)) || 3));
+  const d = newTrip(n.name.trim() || `${new Date().getMonth()+1} 月露營`, days, n.startDate, src);
+  const extra = {};
+  if (src?.memberGroups){
+    extra.memberGroups = Object.fromEntries(Object.entries(src.memberGroups).filter(([, b]) => d.groups.some(g => g.id === b.g)));
+  }
   try {
-    const id = await createTrip(tripSettings(newTrip(`${new Date().getMonth()+1} 月露營`)));
+    const id = await createTrip({...tripSettings(d), ...extra});
+    S.newTrip = null; renderLayer();
     S.nextTab = "setup"; openWhenReady(id);
-    toast("已建立，先設定組別和出席");
+    toast("已建立，確認一下組別和出席");
   } catch(e){ console.error(e); toast(errMsg(e)); }
+}
+function setMyGroup(gid){
+  const trip = currentTrip(), me = myId();
+  const v = {g:gid, name:String(S.user?.displayName || "").slice(0, 60)};
+  write(() => updateDoc(doc(db, "trips", trip.id), {[`memberGroups.${me}`]: v}),
+    () => { DEMO.trip.memberGroups = {...DEMO.trip.memberGroups, [me]: v}; });
+}
+let installEvent = null;
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvent = e; });
+async function installApp(){
+  if (!installEvent){ S.menu = "install"; renderLayer(); return; }
+  closeLayer();
+  installEvent.prompt();
+  await installEvent.userChoice.catch(() => {});
+  installEvent = null;
 }
 async function deleteTrip(){
   const trip = currentTrip();
@@ -587,7 +701,7 @@ function exportCsv(){
 // 備份檔：露營設定 + 所有花費，可以再匯入成一次新的露營
 function exportBackup(){
   const trip = currentTrip();
-  const strip = ({id, createdBy, ...rest}) => rest;
+  const strip = ({id, createdBy, pending, ...rest}) => rest;
   const data = {app:"camp-split", version:1, exportedAt:new Date().toISOString(), trip:tripSettings(JSON.parse(JSON.stringify(trip))), expenses:S.expenses.map(strip)};
   download(`${safeName(trip.name)}-備份.json`, JSON.stringify(data, null, 2), "application/json");
 }
@@ -623,7 +737,11 @@ document.addEventListener("click", ev => {
   if (!t) return;
   const a = t.dataset;
   const f = S.form, d = S.settingsDraft;
-  if (a.act === "close-bg"){ if (ev.target === t){ S.form = null; renderLayer(); } return; }
+  if (a.act === "close-bg"){ if (ev.target === t) closeLayer(); return; }
+  if (a.mygroup){ setMyGroup(a.mygroup); return; }
+  if (S.newTrip && a.from !== undefined){ S.newTrip.from = a.from; renderLayer(); return; }
+  // 選單裡的項目按下後先關掉選單
+  if (S.menu && a.act && !["close", "install", "menu"].includes(a.act)){ S.menu = null; renderLayer(); }
   if (a.tab){ S.tab = a.tab; S.confirm = null; render(); return; }
   if (a.edit){ openForm(S.expenses.find(e => e.id === a.edit)); return; }
   if (a.open){ openTrip(a.open); return; }
@@ -648,14 +766,18 @@ document.addEventListener("click", ev => {
     case "dismiss-invite": S.invite = null; render(); break;
     case "invite": copyInvite(); break;
     case "add": openForm(null); break;
-    case "close": S.form = null; S.confirm = null; renderLayer(); break;
+    case "close": closeLayer(); break;
+    case "menu": S.menu = "main"; renderLayer(); break;
+    case "install": installApp(); break;
+    case "skip-bind": S.skipBind[S.tripId] = true; render(); break;
+    case "create-trip": newTripAction(); break;
     case "save": saveForm(); break;
     case "del": S.confirm = "exp"; renderLayer(); break;
     case "del-yes": deleteExpense(); break;
     case "cancel-confirm": S.confirm = null; S.form ? renderLayer() : render(); break;
     case "demo": startDemo(); break;
     case "leave-demo": leaveDemo(); break;
-    case "new-trip": newTripAction(); break;
+    case "new-trip": openNewTrip(); break;
     case "home": openTrip(null); break;
     case "settled": toggleSettled(); break;
     case "copy": copySettle(); break;
@@ -670,6 +792,11 @@ document.addEventListener("click", ev => {
 });
 document.addEventListener("input", ev => {
   const el = ev.target, f = S.form, d = S.settingsDraft;
+  if (S.newTrip){
+    if (el.id === "n-name"){ S.newTrip.name = el.value; return; }
+    if (el.id === "n-date"){ S.newTrip.startDate = el.value; return; }
+    if (el.id === "n-days"){ S.newTrip.days = el.value; return; }
+  }
   if (f){
     if (el.id === "f-title"){ f.title = el.value; return; }
     if (el.id === "f-amount"){ f.amount = el.value; updatePreview(); return; }
@@ -684,7 +811,7 @@ document.addEventListener("input", ev => {
 });
 document.addEventListener("change", ev => {
   const el = ev.target, f = S.form, d = S.settingsDraft;
-  if (el.id === "import-file" && el.files[0]){ importBackup(el.files[0]); el.value = ""; return; }
+  if (el.id === "import-file" && el.files[0]){ S.menu = null; renderLayer(); importBackup(el.files[0]); el.value = ""; return; }
   if (f && el.id === "f-payer"){ f.payer = el.value; renderLayer(); return; }
   if (d){
     if (el.id === "s-date"){ d.startDate = el.value; render(); return; }
@@ -697,6 +824,10 @@ document.addEventListener("change", ev => {
     }
   }
 });
-document.addEventListener("keydown", ev => { if (ev.key === "Escape" && S.form){ S.form = null; renderLayer(); } });
+document.addEventListener("keydown", ev => { if (ev.key === "Escape" && (S.form || S.menu || S.newTrip)) closeLayer(); });
+addEventListener("online", () => { S.offline = false; render(); });
+addEventListener("offline", () => { S.offline = true; render(); });
+// 把網頁存在手機上，沒網路也能打開
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(e => console.error(e));
 
 render();

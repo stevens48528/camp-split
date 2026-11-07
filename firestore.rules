@@ -2,6 +2,7 @@ rules_version = '2';
 
 // 營地分帳本的權限規則
 // - 露營（trips）：只有白名單的人可以建立；成員可以讀取，只有建立者可以修改設定；
+//   成員可以選自己是哪一組（memberGroups 裡自己的那一格）；
 //   知道露營 ID（邀請連結）的登入者可以讀取並把自己加入成員
 // - 花費（expenses）：只有成員看得到；只能修改或刪除自己記的，露營建立者可以修改全部
 service cloud.firestore {
@@ -29,7 +30,14 @@ service cloud.firestore {
         && d.groups is list && d.groups.size() <= 20
         && d.meals is list
         // 已結清的時間（毫秒），沒結清是 null 或不存在
-        && (!('settledAt' in d) || d.settledAt == null || d.settledAt is int);
+        && (!('settledAt' in d) || d.settledAt == null || d.settledAt is int)
+        && (!('memberGroups' in d) || d.memberGroups is map);
+    }
+    // 成員自己選的組別：{g: 組別 ID, name: 顯示名稱}
+    function validBinding(b) {
+      return b is map && b.keys().hasOnly(['g', 'name'])
+        && b.g is string && b.g.size() <= 40
+        && b.name is string && b.name.size() <= 60;
     }
     function validExpense(d) {
       return d.title is string && d.title.size() > 0 && d.title.size() <= 100
@@ -58,6 +66,12 @@ service cloud.firestore {
         (!(request.auth.uid in resource.data.members)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
           && request.resource.data.members == resource.data.members.concat([request.auth.uid]))
+        ||
+        // 成員選自己是哪一組：只能改 memberGroups 裡自己的那一格
+        (request.auth.uid in resource.data.members
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberGroups'])
+          && request.resource.data.memberGroups.diff(resource.data.get('memberGroups', {})).affectedKeys().hasOnly([request.auth.uid])
+          && validBinding(request.resource.data.memberGroups[request.auth.uid]))
       );
 
       allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;

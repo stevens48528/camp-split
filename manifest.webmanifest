@@ -1,0 +1,16 @@
+{
+  "name": "營地分帳本",
+  "short_name": "分帳本",
+  "description": "露營共同花費分帳，算出最少轉帳筆數。",
+  "lang": "zh-Hant-TW",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef0ea",
+  "theme_color": "#2d6a4c",
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}
