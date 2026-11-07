@@ -45,7 +45,7 @@ test("結算：總收付相等，轉帳筆數最少", () => {
   assert.ok(r.transfers.length <= trip.groups.length - 1);
 });
 
-test("1030 宜蘭幸福城：結果和匯出的 CSV 一致", () => {
+test("四組、部分組別缺席的實際案例：轉帳結果正確", () => {
   const m = ["d1-d","d2-b","d2-l","d2-d","d3-b"];
   const t = { days: 3, meals: m, groups: [
     { id: "y", people: 3, meals: m, nights: [1, 2] }, { id: "f", people: 2, meals: m, nights: [1, 2] },

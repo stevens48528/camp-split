@@ -6,6 +6,8 @@ import { doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, 
 
 let env;
 const TRIP = "trip1";
+// 規則白名單裡可以建立露營的 UID
+const OWNER = "K9pYZJfk12bjxNbng3OR14mtbs12";
 const settings = { name: "宜蘭", days: 3, meals: ["d1-d"], groups: [{ id: "g1", name: "A", people: 2 }] };
 const expense = (by, extra = {}) => ({ title: "食材", amount: 500, payer: "g1", mode: "people", createdBy: by, ...extra });
 
@@ -21,8 +23,8 @@ beforeEach(async () => {
   // owner 建立露營，member 已加入，outsider 不是成員
   await env.withSecurityRulesDisabled(async ctx => {
     const db = ctx.firestore();
-    await setDoc(doc(db, "trips", TRIP), { ...settings, ownerUid: "owner", members: ["owner", "member"], createdAt: 1 });
-    await setDoc(doc(db, "trips", TRIP, "expenses", "byOwner"), expense("owner"));
+    await setDoc(doc(db, "trips", TRIP), { ...settings, ownerUid: OWNER, members: [OWNER, "member"], createdAt: 1 });
+    await setDoc(doc(db, "trips", TRIP, "expenses", "byOwner"), expense(OWNER));
     await setDoc(doc(db, "trips", TRIP, "expenses", "byMember"), expense("member"));
   });
 });
@@ -56,23 +58,25 @@ test("非成員不能把別人加入，也不能趁加入時改其他欄位", as
   await assertFails(updateDoc(doc(as("outsider"), "trips", TRIP), { members: ["outsider"] }));
 });
 
-test("成員可以改設定，但不能改建立者或成員名單", async () => {
-  await assertSucceeds(updateDoc(doc(as("member"), "trips", TRIP), { name: "宜蘭幸福城" }));
+test("只有建立者可以改設定，而且不能改建立者或成員名單", async () => {
+  await assertSucceeds(updateDoc(doc(as(OWNER), "trips", TRIP), { name: "宜蘭幸福城" }));
+  await assertFails(updateDoc(doc(as("member"), "trips", TRIP), { name: "改名" }));
   await assertFails(updateDoc(doc(as("member"), "trips", TRIP), { ownerUid: "member" }));
-  await assertFails(updateDoc(doc(as("member"), "trips", TRIP), { members: ["member"] }));
+  await assertFails(updateDoc(doc(as(OWNER), "trips", TRIP), { ownerUid: "member" }));
+  await assertFails(updateDoc(doc(as(OWNER), "trips", TRIP), { members: [OWNER] }));
 });
 
-test("建立露營時建立者和成員必須是自己", async () => {
-  const db = as("member");
-  await assertSucceeds(setDoc(doc(db, "trips", "t2"), { ...settings, ownerUid: "member", members: ["member"], createdAt: 2 }));
-  await assertFails(setDoc(doc(db, "trips", "t3"), { ...settings, ownerUid: "owner", members: ["member"], createdAt: 2 }));
-  await assertFails(setDoc(doc(db, "trips", "t4"), { ...settings, ownerUid: "member", members: ["member", "outsider"], createdAt: 2 }));
+test("只有白名單的人可以建立露營，建立者和成員必須是自己", async () => {
+  await assertSucceeds(setDoc(doc(as(OWNER), "trips", "t2"), { ...settings, ownerUid: OWNER, members: [OWNER], createdAt: 2 }));
+  await assertFails(setDoc(doc(as("member"), "trips", "t3"), { ...settings, ownerUid: "member", members: ["member"], createdAt: 2 }));
+  await assertFails(setDoc(doc(as(OWNER), "trips", "t4"), { ...settings, ownerUid: OWNER, members: [OWNER, "member"], createdAt: 2 }));
+  await assertFails(setDoc(doc(as("member"), "trips", "t5"), { ...settings, ownerUid: OWNER, members: [OWNER], createdAt: 2 }));
 });
 
 test("成員新增花費時，記錄者必須是自己", async () => {
   const db = as("member");
   await assertSucceeds(setDoc(doc(db, "trips", TRIP, "expenses", "new1"), expense("member")));
-  await assertFails(setDoc(doc(db, "trips", TRIP, "expenses", "new2"), expense("owner")));
+  await assertFails(setDoc(doc(db, "trips", TRIP, "expenses", "new2"), expense(OWNER)));
   await assertFails(setDoc(doc(as("outsider"), "trips", TRIP, "expenses", "new3"), expense("outsider")));
 });
 
@@ -92,12 +96,12 @@ test("成員只能改或刪自己記的花費", async () => {
 });
 
 test("不能把花費的記錄者改成別人", async () => {
-  await assertFails(updateDoc(doc(as("member"), "trips", TRIP, "expenses", "byMember"), { createdBy: "owner" }));
-  await assertFails(updateDoc(doc(as("owner"), "trips", TRIP, "expenses", "byMember"), { createdBy: "owner" }));
+  await assertFails(updateDoc(doc(as("member"), "trips", TRIP, "expenses", "byMember"), { createdBy: OWNER }));
+  await assertFails(updateDoc(doc(as(OWNER), "trips", TRIP, "expenses", "byMember"), { createdBy: OWNER }));
 });
 
 test("建立者可以修改和刪除任何人的花費", async () => {
-  const db = as("owner");
+  const db = as(OWNER);
   await assertSucceeds(updateDoc(doc(db, "trips", TRIP, "expenses", "byMember"), { amount: 700 }));
   await assertSucceeds(deleteDoc(doc(db, "trips", TRIP, "expenses", "byMember")));
 });
@@ -105,5 +109,5 @@ test("建立者可以修改和刪除任何人的花費", async () => {
 test("只有建立者可以刪除露營", async () => {
   await assertFails(deleteDoc(doc(as("member"), "trips", TRIP)));
   await assertFails(deleteDoc(doc(as("outsider"), "trips", TRIP)));
-  await assertSucceeds(deleteDoc(doc(as("owner"), "trips", TRIP)));
+  await assertSucceeds(deleteDoc(doc(as(OWNER), "trips", TRIP)));
 });

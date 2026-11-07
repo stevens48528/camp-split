@@ -1,13 +1,18 @@
 rules_version = '2';
 
 // 營地分帳本的權限規則
-// - 露營（trips）：成員可以讀取和修改設定；知道露營 ID（邀請連結）的登入者可以讀取並把自己加入成員
+// - 露營（trips）：只有白名單的人可以建立；成員可以讀取，只有建立者可以修改設定；
+//   知道露營 ID（邀請連結）的登入者可以讀取並把自己加入成員
 // - 花費（expenses）：只有成員看得到；只能修改或刪除自己記的，露營建立者可以修改全部
 service cloud.firestore {
   match /databases/{database}/documents {
 
     function signedIn() {
       return request.auth != null;
+    }
+    // 可以建立露營的人（Firebase Auth UID），要和 app.js 的 CREATORS 一致
+    function isCreator() {
+      return signedIn() && request.auth.uid in ['K9pYZJfk12bjxNbng3OR14mtbs12'];
     }
     function tripData(tripId) {
       return get(/databases/$(database)/documents/trips/$(tripId)).data;
@@ -36,14 +41,14 @@ service cloud.firestore {
       // 清單查詢：只能查自己是成員的露營
       allow list: if signedIn() && request.auth.uid in resource.data.members;
 
-      allow create: if signedIn()
+      allow create: if isCreator()
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.members == [request.auth.uid]
         && validSettings(request.resource.data);
 
       allow update: if signedIn() && (
-        // 成員修改設定：不能動建立者、成員名單和建立時間
-        (request.auth.uid in resource.data.members
+        // 建立者修改設定：不能動建立者、成員名單和建立時間
+        (resource.data.ownerUid == request.auth.uid
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['ownerUid', 'members', 'createdAt'])
           && validSettings(request.resource.data))
         ||

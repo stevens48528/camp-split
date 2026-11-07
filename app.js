@@ -55,9 +55,14 @@ async function copyText(text, okMsg){
 }
 const safeName = s => (String(s).replace(/[\\/:*?"<>|]/g, "").trim() || "露營");
 
+// 可以建立露營的人（Firebase Auth UID），要和 firestore.rules 的 isCreator() 一致
+const CREATORS = ["K9pYZJfk12bjxNbng3OR14mtbs12"];
 const myId = () => S.mode === "demo" ? "u1" : S.user?.uid;
 const currentTrip = () => S.trips.find(t => t.id === S.tripId) || null;
 const amOwner = () => S.mode !== "demo" && currentTrip()?.ownerUid === myId();
+const canCreate = () => S.mode === "live" && CREATORS.includes(S.user?.uid);
+// 範例模式讓大家試玩設定；正式資料只有建立者能改
+const canEditSettings = () => S.mode === "demo" || amOwner();
 const groupName = (trip, gid) => (trip.groups.find(g => g.id === gid) || {}).name || "已移除的組";
 const who = e => e.createdBy === myId() ? "你" : (e.createdByName || "某位朋友");
 const canEditExp = e => e.createdBy === myId() || amOwner();
@@ -201,7 +206,8 @@ function render(){
   h += `</div><div class="tripbar">`;
   if (S.mode === "live"){
     if (S.trips.length > 1) h += `<select class="trip" id="trip-select" aria-label="切換露營">${S.trips.map(t => `<option value="${esc(t.id)}" ${t.id===S.tripId?"selected":""}>${esc(t.name)}</option>`).join("")}</select>`;
-    h += `<button class="btn" data-act="new-trip">新增露營</button>`;
+    if (canCreate() && S.trips.length) h += `<button class="btn" data-act="new-trip">新增露營</button>
+      <label class="btn filebtn">從備份匯入<input type="file" id="import-file" accept=".json,application/json"></label>`;
   }
   if (S.user && S.mode !== "demo"){
     h += `<span class="userchip">${S.user.photoURL ? `<img src="${esc(S.user.photoURL)}" alt="" referrerpolicy="no-referrer">` : ""}${esc(S.user.displayName || "")}<button class="btn ghost" data-act="signout">登出</button></span>`;
@@ -224,7 +230,10 @@ function render(){
       ${inApp ? `<p class="err">你正在 App 內建的瀏覽器裡，Google 不允許在這裡登入。請點右上角選單，選擇「用預設瀏覽器開啟」。</p>` : ""}
       <div class="row"><button class="btn primary" data-act="signin">用 Google 帳號登入</button><button class="btn" data-act="demo">先看範例</button></div></section>`;
   } else if (!trip){
-    if (S.mode === "live" && !S.invite) h += `<div class="panel stack"><h2>還沒有任何露營紀錄</h2>
+    if (S.mode === "live" && !S.invite && !canCreate()) h += `<div class="panel stack"><h2>還沒有加入任何露營</h2>
+      <p class="muted" style="margin:0">請跟建立露營的朋友要邀請連結，點開後按「加入」，就能一起記帳。</p>
+      <div class="row"><button class="btn" data-act="demo">先看範例</button></div></div>`;
+    else if (S.mode === "live" && !S.invite) h += `<div class="panel stack"><h2>還沒有任何露營紀錄</h2>
       <p class="muted" style="margin:0">建立一次露營，設定天數、有幾組、每組幾個人和實際參加的餐次，再把邀請連結丟到 LINE 群組。朋友加入後，每個人都可以自己新增墊付的花費。</p>
       <div class="row"><button class="btn primary" data-act="new-trip">建立露營</button>
       <label class="btn filebtn">從備份匯入<input type="file" id="import-file" accept=".json,application/json"></label>
@@ -302,7 +311,9 @@ function renderSetup(trip){
     h += `<div class="field"><span>邀請連結（貼到 LINE 群組，朋友用 Google 登入後就能加入）</span>
       <div class="invite-box"><input type="text" id="invite-url" readonly value="${esc(inviteLink(trip.id))}"><button class="btn" data-act="invite">複製</button></div></div>`;
   }
-  h += `<div class="row"><label class="field" style="flex:2 1 220px"><span>露營名稱</span><input type="text" id="s-name" value="${esc(d.name)}"></label>
+  if (!canEditSettings()) h += `<div class="hint">只有建立這次露營的人可以修改設定。如果組別、人數或出席有錯，請跟他說。</div>`;
+  h += `<fieldset class="fs" ${canEditSettings() ? "" : "disabled"}><div class="stack">
+    <div class="row"><label class="field" style="flex:2 1 220px"><span>露營名稱</span><input type="text" id="s-name" value="${esc(d.name)}"></label>
     <label class="field"><span>出發日</span><input type="date" id="s-date" value="${esc(d.startDate||"")}"></label>
     <label class="field" style="flex:0 1 110px"><span>天數</span><input type="number" id="s-days" min="1" max="7" value="${d.days}"></label></div>
     <div class="field"><span>這次有開伙的餐次</span><div class="chips">${allMeals.map(m => `<button class="chip" aria-pressed="${d.meals.includes(m)}" data-tmeal="${m}">${esc(mealLabel(d,m))}</button>`).join("")}</div></div>
@@ -320,14 +331,15 @@ function renderSetup(trip){
     h += `<tr><td>${esc(g.name)}</td>${d.meals.map(m => `<td><input type="checkbox" class="cb" id="att-${g.id}-${m}" data-att="${g.id}|m|${m}" ${g.meals.includes(m)?"checked":""} aria-label="${esc(g.name)} ${esc(mealLabel(d,m))}"></td>`).join("")}
       ${nightsOf(d).map(n => `<td><input type="checkbox" class="cb" id="att-${g.id}-n${n}" data-att="${g.id}|n|${n}" ${g.nights.includes(n)?"checked":""} aria-label="${esc(g.name)} 第${n}晚"></td>`).join("")}</tr>`;
   }
-  h += `</tbody></table></div></div>
+  h += `</tbody></table></div></div></div></fieldset>
     <div class="actions">`;
   if (S.mode === "live") h += `<button class="btn ghost" data-act="backup">下載備份</button>`;
   if (S.mode === "live" && amOwner()) h += S.confirm === "trip"
     ? `<span class="err">刪除後所有花費都會消失。</span><button class="btn danger" data-act="del-trip-yes">確定刪除</button><button class="btn" data-act="cancel-confirm">取消</button>`
     : `<button class="btn ghost" data-act="del-trip">刪除這次露營</button>`;
-  h += `<span class="spacer"></span><button class="btn" data-act="reset-setup">還原</button><button class="btn primary" data-act="save-setup">儲存設定</button></div>
-  </section>`;
+  h += `<span class="spacer"></span>`;
+  if (canEditSettings()) h += `<button class="btn" data-act="reset-setup">還原</button><button class="btn primary" data-act="save-setup">儲存設定</button>`;
+  h += `</div></section>`;
   return h;
 }
 
