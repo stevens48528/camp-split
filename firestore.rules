@@ -1,6 +1,8 @@
 rules_version = '2';
 
 // 營地分帳本的權限規則
+// - 帳號白名單（allow/{email}）：只有清單上的 Google 帳號可以使用，其他登入者什麼都讀寫不到；
+//   每個人只查得到自己的那一筆，看不到別人的 Email；只有管理者可以新增、移除
 // - 露營（trips）：只有白名單的人可以建立；成員可以讀取，只有建立者可以修改設定；
 //   成員可以選自己是哪一組（memberGroups 裡自己的那一格）；
 //   知道露營 ID（邀請連結）的登入者可以讀取並把自己加入成員
@@ -15,11 +17,21 @@ service cloud.firestore {
     function isCreator() {
       return signedIn() && request.auth.uid in ['K9pYZJfk12bjxNbng3OR14mtbs12'];
     }
+    // 已驗證的 Google Email（小寫），用來對照白名單
+    function myEmail() {
+      return request.auth.token.email.lower();
+    }
+    // 在白名單上：管理者一定可以，避免把自己鎖在外面
+    function allowed() {
+      return isCreator()
+        || (signedIn() && request.auth.token.email is string && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/allow/$(myEmail())));
+    }
     function tripData(tripId) {
       return get(/databases/$(database)/documents/trips/$(tripId)).data;
     }
     function isMember(tripId) {
-      return signedIn() && request.auth.uid in tripData(tripId).members;
+      return allowed() && request.auth.uid in tripData(tripId).members;
     }
     function isTripOwner(tripId) {
       return signedIn() && tripData(tripId).ownerUid == request.auth.uid;
@@ -45,18 +57,32 @@ service cloud.firestore {
         && d.createdBy is string;
     }
 
+    match /allow/{email} {
+      // 查自己有沒有權限：只能讀自己 Email 的那一筆
+      allow get: if isCreator()
+        || (signedIn() && request.auth.token.email is string && request.auth.token.email_verified == true
+          && email == myEmail());
+      allow list: if isCreator();
+      // Email 一律存小寫；note 是給管理者看的備註（例如名字）
+      allow create, update: if isCreator() && email == email.lower() && email.size() <= 254
+        && request.resource.data.keys().hasOnly(['note', 'addedAt'])
+        && request.resource.data.note is string && request.resource.data.note.size() <= 40
+        && request.resource.data.addedAt is int;
+      allow delete: if isCreator();
+    }
+
     match /trips/{tripId} {
       // 單筆讀取：拿到邀請連結（露營 ID）的登入者可以看到露營名稱，決定要不要加入
-      allow get: if signedIn();
+      allow get: if allowed();
       // 清單查詢：只能查自己是成員的露營
-      allow list: if signedIn() && request.auth.uid in resource.data.members;
+      allow list: if allowed() && request.auth.uid in resource.data.members;
 
       allow create: if isCreator()
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.members == [request.auth.uid]
         && validSettings(request.resource.data);
 
-      allow update: if signedIn() && (
+      allow update: if allowed() && (
         // 建立者修改設定：不能動建立者、成員名單和建立時間
         (resource.data.ownerUid == request.auth.uid
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['ownerUid', 'members', 'createdAt'])
@@ -74,7 +100,7 @@ service cloud.firestore {
           && validBinding(request.resource.data.memberGroups[request.auth.uid]))
       );
 
-      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+      allow delete: if allowed() && resource.data.ownerUid == request.auth.uid;
 
       match /expenses/{expenseId} {
         allow read: if isMember(tripId);

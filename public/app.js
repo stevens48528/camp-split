@@ -21,7 +21,9 @@ const auth = getAuth(fb);
 const db = initializeFirestore(fb, {localCache: persistentLocalCache({tabManager: persistentMultipleTabManager()})});
 
 const S = {
-  mode:"loading",     // loading | signedout | live | demo
+  mode:"loading",     // loading | signedout | noaccess | live | demo
+  view:null,          // "admin"：成員管理頁
+  allow:[], allowDraft:{email:"", note:""},
   user:null, trips:[], tripId:null, expenses:[], tab:"list",
   invite:null,        // {id, name}：從邀請連結進來、還不是成員的露營
   form:null, settingsDraft:null, confirm:null,
@@ -142,12 +144,39 @@ function openTrip(id, replace){
 function route(){
   if (S.mode !== "live") return;
   let id = decodeURIComponent(location.hash.slice(1));
+  if (id === "admin" && canCreate()){
+    if (S.tripId) selectTrip(null);
+    S.view = "admin"; watchAllow(); render(); return;
+  }
+  S.view = null; unwatchAllow();
   if (id && !S.trips.some(t => t.id === id)){ id = ""; history.replaceState(null, "", location.pathname); }
   if (id !== (S.tripId || "")){ S.tab = S.nextTab || "list"; S.nextTab = null; selectTrip(id || null); }
   else render();
   if (!id) loadSummaries();
 }
 addEventListener("popstate", route);
+// 成員管理頁打開時才讀白名單
+let unsubAllow = null;
+function watchAllow(){
+  if (unsubAllow) return;
+  unsubAllow = onSnapshot(collection(db, "allow"), snap => {
+    S.allow = snap.docs.map(d => ({email:d.id, ...d.data()})).sort((a,b) => (b.addedAt||0) - (a.addedAt||0));
+    if (S.view === "admin") render();
+  }, e => { console.error(e); toast("讀取成員名單失敗。"); });
+}
+function unwatchAllow(){ if (unsubAllow){ unsubAllow(); unsubAllow = null; } }
+// 帳號白名單：管理者一定可以；其他人查 allow/{自己的 Email} 存不存在。真正的把關在權限規則
+async function checkAccess(user){
+  if (CREATORS.includes(user.uid)) return true;
+  const email = (user.email || "").toLowerCase();
+  if (!email) return false;
+  try { return (await getDoc(doc(db, "allow", email))).exists(); }
+  catch(e){
+    if (e.code === "permission-denied") return false;
+    // 沒網路又沒有快取時先放行，畫面上能顯示的也只有手機裡已經存過的資料
+    console.error(e); return true;
+  }
+}
 // 露營清單要顯示每場的總花費，打開清單時把各場的花費讀一次來算
 let summarySeq = 0;
 async function loadSummaries(){
@@ -198,15 +227,20 @@ async function signIn(){
     }
   }
 }
-onAuthStateChanged(auth, user => {
+onAuthStateChanged(auth, async user => {
   S.user = user;
   if (S.mode === "demo") return;
   if (!user){
     if (unsubTrips){ unsubTrips(); unsubTrips = null; }
     if (unsubExp){ unsubExp(); unsubExp = null; }
-    S.mode = "signedout"; S.trips = []; S.tripId = null; S.expenses = [];
+    unwatchAllow();
+    S.mode = "signedout"; S.trips = []; S.tripId = null; S.expenses = []; S.view = null;
     render(); return;
   }
+  S.mode = "loading"; render();
+  const ok = await checkAccess(user);
+  if (S.user !== user || S.mode === "demo") return;
+  if (!ok){ S.mode = "noaccess"; render(); return; }
   S.mode = "live"; S.tripsLoaded = false;
   render();
   subscribeTrips();
@@ -246,10 +280,11 @@ function leaveDemo(){
 function render(){
   const app = $("#app");
   const trip = currentTrip();
-  const home = S.mode === "live" && !trip && S.trips.length > 0;
+  const admin = S.mode === "live" && S.view === "admin";
+  const home = S.mode === "live" && !trip && !admin && S.trips.length > 0;
   let h = `<header class="top"><div>`;
-  if (S.mode === "live" && trip) h += `<button class="btn ghost back" data-act="home">← 全部露營</button>`;
-  h += `<div class="label">營地分帳本</div><h1>${trip ? esc(trip.name) : home ? "我的露營" : "營地分帳本"}</h1>`;
+  if (S.mode === "live" && (trip || admin)) h += `<button class="btn ghost back" data-act="home">← 全部露營</button>`;
+  h += `<div class="label">營地分帳本</div><h1>${trip ? esc(trip.name) : admin ? "成員管理" : home ? "我的露營" : "營地分帳本"}</h1>`;
   if (trip) h += `<div class="small muted">${tripLine(trip)}</div>`;
   else if (home) h += `<div class="small muted">共 ${S.trips.length} 場</div>`;
   h += `</div><div class="tripbar">`;
@@ -278,6 +313,14 @@ function render(){
       <p class="muted">每組自己記下墊付的花費，依人數、餐數或住宿晚數分攤，最後算出最少的轉帳筆數，複製到 LINE 群組就好。</p>
       ${inApp ? `<p class="err">你正在 App 內建的瀏覽器裡，Google 不允許在這裡登入。請點右上角選單，選擇「用預設瀏覽器開啟」。</p>` : ""}
       <div class="row"><button class="btn primary" data-act="signin">用 Google 帳號登入</button><button class="btn" data-act="demo">先看範例</button></div></section>`;
+  } else if (S.mode === "noaccess"){
+    const email = S.user?.email || "";
+    h += `<section class="panel stack"><h2>你還沒有使用權限</h2>
+      <p class="muted" style="margin:0">這個分帳本只開放給受邀的朋友。請把下面的 Email 傳給建立露營的朋友，他加入名單後，重新整理這一頁就能使用。</p>
+      <div class="invite-box"><input type="text" readonly value="${esc(email)}" aria-label="你的 Email"><button class="btn" data-act="copy-email">複製</button></div>
+      <div class="row"><button class="btn primary" data-act="recheck">重新整理</button><button class="btn" data-act="signout">換一個帳號</button></div></section>`;
+  } else if (admin){
+    h += renderAdmin();
   } else if (home){
     h += renderHome();
   } else if (!trip){
@@ -333,6 +376,34 @@ function renderHome(){
       <span class="meta">${tripLine(t)}</span><span class="meta">${sum}</span>${m}</button>`;
   }
   return h + "</section>";
+}
+
+function renderAdmin(){
+  const d = S.allowDraft;
+  let h = `<section class="panel stack">
+    <p class="muted" style="margin:0">只有名單上的 Google 帳號可以使用這個網站。不在名單上的人登入後什麼都看不到，拿到邀請連結也一樣。</p>
+    <div class="row admin-add"><label class="field" style="flex:2 1 220px"><span>Email</span><input type="email" id="a-email" autocomplete="off" value="${esc(d.email)}" placeholder="name@gmail.com"></label>
+      <label class="field"><span>備註（選填）</span><input type="text" id="a-note" maxlength="40" value="${esc(d.note)}" placeholder="例如：小華"></label>
+      <button class="btn primary" data-act="allow-add">加入</button></div>
+    <div class="hint">朋友登入後如果看到「還沒有使用權限」，畫面上會顯示他的 Email，請他複製給你。移除後對方馬上無法使用，但原本記的花費會保留。</div></section>
+    <section class="stack"><h2 class="label">已允許 ${S.allow.length} 個帳號（你自己是管理者，不需要在名單上）</h2>`;
+  for (const a of S.allow){
+    const asking = S.confirm === "allow:" + a.email;
+    h += `<div class="allow-row"><div><div class="num">${esc(a.email)}</div><div class="hint">${a.note ? esc(a.note) + " · " : ""}${a.addedAt ? new Date(a.addedAt).toLocaleDateString("zh-TW") + " 加入" : ""}</div></div>
+      ${asking ? `<span class="row"><button class="btn danger" data-unallow="${esc(a.email)}">確定移除</button><button class="btn" data-act="cancel-confirm">取消</button></span>`
+        : `<button class="btn ghost" data-ask-unallow="${esc(a.email)}">移除</button>`}</div>`;
+  }
+  return h + `</section>`;
+}
+function addAllow(){
+  const email = S.allowDraft.email.trim().toLowerCase(), note = S.allowDraft.note.trim().slice(0, 40);
+  if (!/^[^\s@\/]+@[^\s@\/]+\.[^\s@\/]+$/.test(email)) return toast("請輸入正確的 Email。");
+  write(() => setDoc(doc(db, "allow", email), {note, addedAt:Date.now()}), () => {});
+  S.allowDraft = {email:"", note:""}; render(); toast(`已加入 ${email}`);
+}
+function removeAllow(email){
+  write(() => writeBatch(db).delete(doc(db, "allow", email)).commit(), () => {});
+  S.confirm = null; toast(`已移除 ${email}`);
 }
 
 function renderSettle(trip){
@@ -484,9 +555,10 @@ function menuHTML(){
     h += item("export", "匯出 CSV（Excel）", S.expenses.length ? "" : "disabled");
     if (live) h += item("backup", "下載備份");
     if (canEditSettings() && S.expenses.length) h += item("settled", trip.settledAt ? "取消已結清" : "標記已結清");
-  } else if (canCreate()){
+  } else if (canCreate() && S.view !== "admin"){
     h += `<label class="menu-item filebtn">從備份匯入<input type="file" id="import-file" accept=".json,application/json"></label>`;
   }
+  if (canCreate() && S.view !== "admin") h += item("admin", "成員管理");
   if (!standalone) h += item("install", "加到手機主畫面");
   if (S.mode === "demo") h += item("leave-demo", "結束範例");
   if (live) h += item("signout", "登出");
@@ -745,6 +817,8 @@ document.addEventListener("click", ev => {
   if (a.tab){ S.tab = a.tab; S.confirm = null; render(); return; }
   if (a.edit){ openForm(S.expenses.find(e => e.id === a.edit)); return; }
   if (a.open){ openTrip(a.open); return; }
+  if (a.askUnallow){ S.confirm = "allow:" + a.askUnallow; render(); return; }
+  if (a.unallow){ removeAllow(a.unallow); return; }
   if (f && a.cat){
     const c = catOf(a.cat); f.cat = a.cat;
     if (!c.modes.includes(f.mode) || (!f.id && !f.touchedMode)){ f.mode = c.modes[0]; if (c.unit) f.unit = c.unit; }
@@ -779,6 +853,10 @@ document.addEventListener("click", ev => {
     case "leave-demo": leaveDemo(); break;
     case "new-trip": openNewTrip(); break;
     case "home": openTrip(null); break;
+    case "admin": openTrip("admin"); break;
+    case "allow-add": addAllow(); break;
+    case "recheck": location.reload(); break;
+    case "copy-email": copyText(S.user?.email || "", "已複製 Email"); break;
     case "settled": toggleSettled(); break;
     case "copy": copySettle(); break;
     case "export": exportCsv(); break;
@@ -792,6 +870,8 @@ document.addEventListener("click", ev => {
 });
 document.addEventListener("input", ev => {
   const el = ev.target, f = S.form, d = S.settingsDraft;
+  if (el.id === "a-email"){ S.allowDraft.email = el.value; return; }
+  if (el.id === "a-note"){ S.allowDraft.note = el.value; return; }
   if (S.newTrip){
     if (el.id === "n-name"){ S.newTrip.name = el.value; return; }
     if (el.id === "n-date"){ S.newTrip.startDate = el.value; return; }
@@ -824,7 +904,10 @@ document.addEventListener("change", ev => {
     }
   }
 });
-document.addEventListener("keydown", ev => { if (ev.key === "Escape" && (S.form || S.menu || S.newTrip)) closeLayer(); });
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape" && (S.form || S.menu || S.newTrip)) closeLayer();
+  if (ev.key === "Enter" && ["a-email", "a-note"].includes(ev.target.id)) addAllow();
+});
 addEventListener("online", () => { S.offline = false; render(); });
 addEventListener("offline", () => { S.offline = true; render(); });
 // 把網頁存在手機上，沒網路也能打開

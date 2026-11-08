@@ -26,13 +26,57 @@ beforeEach(async () => {
     await setDoc(doc(db, "trips", TRIP), { ...settings, ownerUid: OWNER, members: [OWNER, "member"], createdAt: 1 });
     await setDoc(doc(db, "trips", TRIP, "expenses", "byOwner"), expense(OWNER));
     await setDoc(doc(db, "trips", TRIP, "expenses", "byMember"), expense("member"));
+    // 白名單：member 和 outsider 可以使用；stranger 不在清單上
+    for (const u of ["member", "outsider"]) await setDoc(doc(db, "allow", `${u}@test.com`), { note: u, addedAt: 1 });
   });
 });
-const as = uid => (uid ? env.authenticatedContext(uid) : env.unauthenticatedContext()).firestore();
+// 每個測試帳號都有已驗證的 Email：<uid>@test.com
+const as = (uid, token = {}) => (uid
+  ? env.authenticatedContext(uid, { email: `${uid}@test.com`, email_verified: true, ...token })
+  : env.unauthenticatedContext()).firestore();
 
 test("未登入的人什麼都讀不到", async () => {
   await assertFails(getDoc(doc(as(null), "trips", TRIP)));
   await assertFails(getDocs(collection(as(null), "trips", TRIP, "expenses")));
+});
+
+test("不在白名單的人登入後什麼都讀寫不到，拿到邀請連結也一樣", async () => {
+  const db = as("stranger");
+  await assertFails(getDoc(doc(db, "trips", TRIP)));
+  await assertFails(getDocs(query(collection(db, "trips"), where("members", "array-contains", "stranger"))));
+  await assertFails(updateDoc(doc(db, "trips", TRIP), { members: arrayUnion("stranger") }));
+  await assertFails(getDocs(collection(db, "trips", TRIP, "expenses")));
+});
+
+test("從白名單移除後，原本的成員也會被擋", async () => {
+  await assertSucceeds(getDocs(collection(as("member"), "trips", TRIP, "expenses")));
+  await env.withSecurityRulesDisabled(ctx => deleteDoc(doc(ctx.firestore(), "allow", "member@test.com")));
+  await assertFails(getDocs(collection(as("member"), "trips", TRIP, "expenses")));
+  await assertFails(getDoc(doc(as("member"), "trips", TRIP)));
+  await assertFails(setDoc(doc(as("member"), "trips", TRIP, "expenses", "x"), expense("member")));
+});
+
+test("Email 沒有驗證過，就算在白名單上也不行", async () => {
+  await assertFails(getDoc(doc(as("member", { email_verified: false }), "trips", TRIP)));
+});
+
+test("白名單：每個人只查得到自己那一筆，只有管理者能看全部和修改", async () => {
+  await assertSucceeds(getDoc(doc(as("member"), "allow", "member@test.com")));
+  await assertSucceeds(getDoc(doc(as("stranger"), "allow", "stranger@test.com")));
+  await assertFails(getDoc(doc(as("stranger"), "allow", "member@test.com")));
+  await assertFails(getDoc(doc(as("member"), "allow", "outsider@test.com")));
+  await assertFails(getDocs(collection(as("member"), "allow")));
+  await assertFails(setDoc(doc(as("stranger"), "allow", "stranger@test.com"), { note: "", addedAt: 1 }));
+  await assertFails(deleteDoc(doc(as("member"), "allow", "outsider@test.com")));
+  await assertSucceeds(getDocs(collection(as(OWNER), "allow")));
+  await assertSucceeds(setDoc(doc(as(OWNER), "allow", "new@test.com"), { note: "新朋友", addedAt: 2 }));
+  await assertFails(setDoc(doc(as(OWNER), "allow", "Upper@test.com"), { note: "", addedAt: 2 }));
+  await assertFails(setDoc(doc(as(OWNER), "allow", "x@test.com"), { note: "", addedAt: 2, admin: true }));
+  await assertSucceeds(deleteDoc(doc(as(OWNER), "allow", "new@test.com")));
+});
+
+test("管理者不在白名單上也能使用，不會把自己鎖在外面", async () => {
+  await assertSucceeds(getDoc(doc(as(OWNER), "trips", TRIP)));
 });
 
 test("登入且有邀請連結的人可以讀到露營本身，但讀不到花費", async () => {

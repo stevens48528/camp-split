@@ -152,3 +152,8 @@ input[type=number]{font-family:var(--f-num)}
 .tripcard .you{font-size:.9rem}
 .tripcard .you.neg{color:var(--ember)} .tripcard .you.pos{color:var(--good)}
 .transfer.mine{outline:2px solid var(--accent);outline-offset:-2px}
+
+/* 成員管理 */
+.admin-add{align-items:flex-end}
+.allow-row{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.allow-row .num{font-size:.9rem;word-break:break-all}
