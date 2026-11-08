@@ -6,3 +6,8 @@ private/
 HANDOFF.md
 *.csv
 camp-split.html
+
+# firebase init 安裝的 AI 助手教學文件，與網站無關
+.agents/
+.claude/
+skills-lock.json

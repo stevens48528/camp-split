@@ -9,6 +9,11 @@
 
 登入網域（authDomain）和網站同一個網域，iPhone 等會隔離跨網站資料的瀏覽器才能正常登入。
 
+## 部署
+
+推到 `main` 後，GitHub Actions 會先跑測試（計算邏輯 + 權限規則），通過才部署網站（`.github/workflows/firebase-hosting-merge.yml`）。
+權限規則不會自動部署，改了 `firestore.rules` 要在本機跑完測試後手動部署。
+
 ## 開發
 
 ```bash

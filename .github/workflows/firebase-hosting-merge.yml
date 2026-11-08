@@ -1,0 +1,39 @@
+# 推到 main：先跑計算邏輯和權限規則的測試，通過才部署網站到 Firebase Hosting
+# 權限規則（firestore.rules）仍在本機測試後手動部署：firebase deploy --only firestore:rules
+name: Test and deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Firestore 模擬器需要 Java
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npm install -g firebase-tools@15.35.0
+      - run: npm test
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_CAMP_SPLIT_B3A20 }}
+          channelId: live
+          projectId: camp-split-b3a20
