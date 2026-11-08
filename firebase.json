@@ -3,6 +3,24 @@
     "database": "(default)",
     "rules": "firestore.rules"
   },
+  "hosting": {
+    "public": "public",
+    "ignore": ["**/.*"],
+    "headers": [
+      {
+        "source": "**/*.@(html|js|css|webmanifest)",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+      },
+      {
+        "source": "/",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+      },
+      {
+        "source": "**/*.png",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=604800" }]
+      }
+    ]
+  },
   "emulators": {
     "firestore": { "port": 8080 },
     "ui": { "enabled": false },

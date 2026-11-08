@@ -1,7 +1,7 @@
 // 分攤與結算邏輯的測試
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sharesFor, settle, defaultMeals } from "../split.js";
+import { sharesFor, settle, defaultMeals } from "../public/split.js";
 
 const meals = defaultMeals(3);
 const trip = { days: 3, meals, groups: [

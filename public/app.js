@@ -9,7 +9,7 @@ import { SLOTS, CATS, catOf, MODES, PCTS, money, mealIds, defaultMeals, dayLabel
 // 這段設定本來就會公開在網頁上，安全性由 Firebase Auth 和 firestore.rules 負責
 const firebaseConfig = {
   apiKey: "AIzaSyClBGCdUK-T2zFWnVbP8pKvW6DyQ_LPIm4",
-  authDomain: "camp-split-b3a20.firebaseapp.com",
+  authDomain: "camp-split-b3a20.web.app",
   projectId: "camp-split-b3a20",
   storageBucket: "camp-split-b3a20.firebasestorage.app",
   messagingSenderId: "451437047186",
