@@ -94,7 +94,27 @@ export function settle(trip, expenses){
     if (!c.b) cred.shift(); if (!d.b) debt.shift();
     cred.sort((a,b) => b.b - a.b); debt.sort((a,b) => b.b - a.b);
   }
-  return {rows, total, transfers};
+  return {rows, total, transfers, bal:Object.fromEntries(bal.map(x => [x.id, x.b]))};
+}
+// 不抵銷時：每組把自己的分攤直接付給墊付的組，同一對組別之間先互抵
+// 回傳 [{from, to, amt, fwd:[{e,v}], back:[{e,v}]}]，fwd 是 from 欠 to 的項目，back 是反方向
+export function pairwise(trip, expenses){
+  const m = new Map();
+  for (const e of expenses){
+    for (const [gid, v] of Object.entries(sharesFor(e, trip))){
+      if (!v || gid === e.payer || !trip.groups.some(g => g.id === e.payer)) continue;
+      const [a, b] = [gid, e.payer].sort(), k = a + "|" + b;
+      if (!m.has(k)) m.set(k, {a, b, ab:[], ba:[]});
+      m.get(k)[gid === a ? "ab" : "ba"].push({e, v});
+    }
+  }
+  const sum = xs => xs.reduce((s, x) => s + x.v, 0), out = [];
+  for (const {a, b, ab, ba} of m.values()){
+    const net = sum(ab) - sum(ba), amt = Math.round(Math.abs(net));
+    if (!amt) continue;
+    out.push(net > 0 ? {from:a, to:b, amt, fwd:ab, back:ba} : {from:b, to:a, amt, fwd:ba, back:ab});
+  }
+  return out.sort((x, y) => y.amt - x.amt);
 }
 export function describe(e){
   if (e.mode === "nights") return `依晚數（每${e.unit === "person" ? "人" : "組"}）`;

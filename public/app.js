@@ -4,7 +4,7 @@ import { getAuth, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signI
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, query, where, onSnapshot, setDoc, updateDoc, getDoc, getDocs, arrayUnion, writeBatch }
   from "https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js";
 import { SLOTS, CATS, catOf, MODES, PCTS, money, mealIds, defaultMeals, dayLabel, mealLabel, nightsOf,
-  sharedAmount, sharesFor, settle, describe } from "./split.js";
+  sharedAmount, sharesFor, settle, pairwise, describe } from "./split.js";
 
 // 這段設定本來就會公開在網頁上，安全性由 Firebase Auth 和 firestore.rules 負責
 const firebaseConfig = {
@@ -31,6 +31,7 @@ const S = {
   newTrip:null,       // 新增露營的表單
   skipBind:{},        // 這次先不選組別的露營
   offline:!navigator.onLine,
+  how:false,          // 計算過程視窗
   summaries:{},       // 露營清單用：{露營ID: {total, transfers, count}}
 };
 let unsubTrips = null, unsubExp = null, DEMO = null;
@@ -110,6 +111,7 @@ function write(fn, demoFn){
   catch(e){ console.error(e); toast(errMsg(e)); return false; }
 }
 function selectTrip(id){
+  S.how = false;
   S.tripId = id; S.expenses = []; S.settingsDraft = null; S.confirm = null; S.form = null;
   if (unsubExp){ unsubExp(); unsubExp = null; }
   if (S.mode === "demo") S.expenses = DEMO.expenses;
@@ -407,26 +409,25 @@ function removeAllow(email){
 }
 
 function renderSettle(trip){
-  const {rows, total, transfers} = settle(trip, S.expenses);
+  const {total, transfers, bal} = settle(trip, S.expenses);
+  const gn = id => esc(groupName(trip, id));
+  const res = b => `<span class="res num ${b>0?"pos":b<0?"neg":""}">${b>0?"收 ":b<0?"付 ":""}${money(Math.abs(b))}</span>`;
   let h = `<section class="panel settle" aria-label="結算">
     <div class="settle-head"><div><div class="label">共同花費${trip.settledAt ? ` <span class="pill acc">✓ 已結清</span>` : ""}</div><div class="total num">${money(total)}</div></div>
     <button class="btn" data-act="copy" ${transfers.length ? "" : "disabled"}>複製結算到 LINE</button></div>`;
   if (!S.expenses.length){
-    h += `<div class="empty">還沒有花費。按下方「新增花費」，記下誰先墊了多少。</div>`;
-  } else if (!transfers.length){
+    return h + `<div class="empty">還沒有花費。按下方「新增花費」，記下誰先墊了多少。</div></section>`;
+  }
+  if (!transfers.length){
     h += `<div class="empty">大家已經打平，不需要轉帳。</div>`;
   } else {
     h += `<div><div class="label" style="margin-bottom:6px">${trip.settledAt ? "已結清，當時的轉帳如下" : `轉帳 ${transfers.length} 筆就結清`}</div><ul class="transfers">${transfers.map(t =>
-      `<li class="transfer${[t.from, t.to].includes(myGroup(trip)) ? " mine" : ""}"><span>${esc(groupName(trip,t.from))}</span><span class="arrow" aria-label="轉給">→</span><span class="to">${esc(groupName(trip,t.to))}</span><span class="amt num">${money(t.amt)}</span></li>`).join("")}</ul></div>`;
+      `<li class="transfer${[t.from, t.to].includes(myGroup(trip)) ? " mine" : ""}"><span>${gn(t.from)}</span><span class="arrow" aria-label="轉給">→</span><span class="to">${gn(t.to)}</span><span class="amt num">${money(t.amt)}</span></li>`).join("")}</ul>
+      <p class="hint settle-note">各組之間的應收、應付已經先互相抵銷，所以有墊錢的組不一定會直接收到每一組的轉帳。照上面轉完，每組實際花的錢都剛好等於自己應分攤的金額。</p></div>`;
   }
-  h += `<div class="tablewrap"><table><thead><tr><th>組別</th><th>人數</th><th>先墊付</th><th>應分攤</th><th>每人約</th><th>差額</th></tr></thead><tbody>`;
-  for (const g of trip.groups){
-    const r = rows[g.id], diff = Math.round(r.paid - r.owe);
-    h += `<tr><td>${esc(g.name)}</td><td class="num">${+g.people||0}</td><td class="num">${money(r.paid)}</td><td class="num">${money(r.owe)}</td><td class="num muted">${g.people>0?money(r.owe/g.people):"-"}</td>
-      <td class="num ${diff>0?"pos":diff<0?"neg":""}">${diff>0?"收 ":diff<0?"付 ":""}${money(Math.abs(diff))}</td></tr>`;
-  }
-  h += `</tbody></table></div><div class="hint">金額四捨五入到元。差額「收」代表這組會收到錢，「付」代表要轉出。</div></section>`;
-  return h;
+
+  if (transfers.length) h += `<button class="linkbtn" data-act="how">為什麼只要 ${transfers.length} 筆轉帳？看計算過程</button>`;
+  return h + `</section>`;
 }
 
 function renderList(trip){
@@ -579,6 +580,31 @@ function newTripHTML(){
     <div class="actions"><span class="spacer"></span><button class="btn" data-act="close">取消</button><button class="btn primary" data-act="create-trip">建立</button></div>
     </div></div></div>`;
 }
+// 計算過程：① 各自付給墊付的組 → ② 每組合併成一個差額 → ③ 配對成最少轉帳
+function howHTML(trip){
+  const {transfers, bal} = settle(trip, S.expenses), pw = pairwise(trip, S.expenses);
+  const gn = id => esc(groupName(trip, id));
+  const res = b => `<span class="res num ${b>0?"pos":b<0?"neg":""}">${b>0?"收 ":b<0?"付 ":""}${money(Math.abs(b))}</span>`;
+  const items = xs => xs.map(x => `${esc(x.e.title || "未命名")} ${money(x.v)}`).join("、");
+  const sum = xs => xs.reduce((a, x) => a + x.v, 0);
+  const merged = trip.groups.filter(g => bal[g.id]).map(g => {
+    const parts = pw.filter(t => t.from === g.id || t.to === g.id)
+      .map(t => t.to === g.id ? `收${gn(t.from)} ${money(t.amt)}` : `付${gn(t.to)} ${money(t.amt)}`);
+    return `<li><div class="pair"><span>${esc(g.name)}</span>${res(bal[g.id])}</div><div class="muted small">${parts.join("、")}</div></li>`;
+  });
+  return `<div class="overlay" data-act="close-bg"><div class="sheet how" role="dialog" aria-modal="true" aria-labelledby="h-head">
+    <div class="sheet-head"><h2 id="h-head">計算過程</h2><button class="btn ghost" data-act="close">關閉</button></div>
+    <div class="stack">
+      <div><h4>① 每組各自把錢付給墊付的組：${pw.length} 筆</h4>
+        <ul class="steps">${pw.map(t => `<li><div class="pair"><span>${gn(t.from)} → ${gn(t.to)}</span><span class="num">${money(t.amt)}</span></div>
+          <div class="muted small">${gn(t.from)}分攤${gn(t.to)}墊的 ${money(sum(t.fwd))}（${items(t.fwd)}）${t.back.length ? `<br>－ ${gn(t.to)}分攤${gn(t.from)}墊的 ${money(sum(t.back))}（${items(t.back)}）` : ""}</div></li>`).join("")}</ul></div>
+      <div><h4>② 每組把要收、要付的合併成一個數字</h4>
+        <ul class="steps">${merged.join("")}</ul></div>
+      <div><h4>③ 要付的組直接轉給要收的組：${transfers.length} 筆</h4>
+        <ul class="steps">${transfers.map(t => `<li><div class="pair"><span>${gn(t.from)} → ${gn(t.to)}</span><span class="num">${money(t.amt)}</span></div></li>`).join("")}</ul>
+        <p class="hint">由要付最多的組，先轉給要收最多的組，依序配對。中間經手的錢互相抵掉了，每組最後收付的總額不變。</p></div>
+    </div></div></div>`;
+}
 function setLayer(h){
   const layer = $("#layer");
   const focusId = document.activeElement?.id;
@@ -587,10 +613,11 @@ function setLayer(h){
   if (sheetScroll) $(".sheet", layer).scrollTop = sheetScroll;
   if (focusId) document.getElementById(focusId)?.focus();
 }
-function closeLayer(){ S.form = null; S.menu = null; S.newTrip = null; S.confirm = null; renderLayer(); }
+function closeLayer(){ S.how = false; S.form = null; S.menu = null; S.newTrip = null; S.confirm = null; renderLayer(); }
 function renderLayer(){
   if (S.menu) return setLayer(menuHTML());
   if (S.newTrip) return setLayer(newTripHTML());
+  if (S.how && currentTrip()) return setLayer(howHTML(currentTrip()));
   const layer = $("#layer");
   const trip = currentTrip();
   if (!S.form || !trip){ layer.innerHTML = ""; return; }
@@ -794,7 +821,8 @@ async function importBackup(file){
 function copySettle(){
   const trip = currentTrip(), {rows, total, transfers} = settle(trip, S.expenses);
   const lines = [`【${trip.name}】分帳結果`, `共同花費 ${money(total)}`, "",
-    ...transfers.map(t => `${groupName(trip,t.from)} → ${groupName(trip,t.to)}  ${money(t.amt)}`), "",
+    ...transfers.map(t => `${groupName(trip,t.from)} → ${groupName(trip,t.to)}  ${money(t.amt)}`),
+    "（各組的應收應付已先互相抵銷，用最少轉帳結清；計算過程可在網站的結算頁查看）", "",
     ...trip.groups.map(g => `${g.name}（${g.people} 人）墊付 ${money(rows[g.id].paid)}，分攤 ${money(rows[g.id].owe)}`)];
   copyText(lines.join("\n"), "已複製，可以直接貼到 LINE");
 }
@@ -842,6 +870,7 @@ document.addEventListener("click", ev => {
     case "add": openForm(null); break;
     case "close": closeLayer(); break;
     case "menu": S.menu = "main"; renderLayer(); break;
+    case "how": S.how = true; renderLayer(); break;
     case "install": installApp(); break;
     case "skip-bind": S.skipBind[S.tripId] = true; render(); break;
     case "create-trip": newTripAction(); break;
@@ -905,7 +934,7 @@ document.addEventListener("change", ev => {
   }
 });
 document.addEventListener("keydown", ev => {
-  if (ev.key === "Escape" && (S.form || S.menu || S.newTrip)) closeLayer();
+  if (ev.key === "Escape" && (S.form || S.menu || S.newTrip || S.how)) closeLayer();
   if (ev.key === "Enter" && ["a-email", "a-note"].includes(ev.target.id)) addAllow();
 });
 addEventListener("online", () => { S.offline = false; render(); });

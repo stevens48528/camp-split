@@ -62,3 +62,21 @@ test("四組、部分組別缺席的實際案例：轉帳結果正確", () => {
     { from: "f", to: "y", amt: 3613 }, { from: "d", to: "y", amt: 1806 }, { from: "x", to: "y", amt: 1715 },
   ]);
 });
+
+test("不抵銷的兩兩互付：合計和抵銷後的差額一致", async () => {
+  const { pairwise } = await import("../public/split.js");
+  const exps = [
+    { id: "1", amount: 900, mode: "people", groups: all, payer: "a" },
+    { id: "2", amount: 600, mode: "group", groups: all, payer: "b" },
+    { id: "3", amount: 300, mode: "group", groups: ["a", "c"], payer: "c" },
+  ];
+  const { bal } = settle(trip, exps);
+  const pw = pairwise(trip, exps);
+  // 每組的兩兩淨額加總要等於這組的差額
+  for (const g of trip.groups){
+    const net = pw.reduce((s, t) => s + (t.to === g.id ? t.amt : t.from === g.id ? -t.amt : 0), 0);
+    assert.equal(net, bal[g.id]);
+  }
+  // b 欠 a 200（第 1 筆），a 欠 b 200（第 2 筆）→ 互抵為 0，不會出現
+  assert.ok(!pw.some(t => [t.from, t.to].sort().join() === "a,b"));
+});
